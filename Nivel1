@@ -1,0 +1,316 @@
+#include "nivel1.h"
+#include "gladiador.h"
+#include "enemigo.h"
+#include <QMessageBox>
+#include <QGraphicsPixmapItem>
+
+/*
+ * NIVEL1 HEREDA DE Nivel:
+ * - Nivel contiene: escena, jugador, timers, HUD (vida/tiempo).
+ * - Nivel1 agrega: generación de enemigos, música propia y lógica del nivel.
+ * - Polimorfismo: mostrarNivel() crea Nivel1, Nivel2 o Nivel3 dinámicamente.
+ */
+
+Nivel1::Nivel1(QWidget *parent)
+    : Nivel(1, parent), // Llama al constructor de la clase base "Nivel".
+      timerSegundo(nullptr), // Timer especializado para medir tiempo real (1 segundo).
+      enemigosEliminados(0), // Contador de enemigos muertos.
+      tiempoTranscurrido(0), // Tiempo que lleva funcionando el nivel.
+      musicaNivel(nullptr),  // Reproductor de música local del nivel.
+      audioOutput(nullptr)   // Salida de audio asociada.
+{
+    setWindowTitle("Nivel 1 - Coliseo Romano"); // Configura título de la ventana.
+    inicializarNivel(); // Inicializa todo (fondo, jugador, enemigos, música, timers…)
+}
+
+Nivel1::~Nivel1()
+{
+    /*
+     * RESPONSABILIDAD DEL DESTRUCTOR:
+     * - Liberar memoria asignada con new.
+     * - Evitar fugas de memoria.
+     * - Detener timers para que no sigan llamando slots.
+     */
+
+    if (musicaNivel) { musicaNivel->stop(); delete musicaNivel; musicaNivel = nullptr; }
+    if (audioOutput) { delete audioOutput; audioOutput = nullptr; }
+    if (timerSegundo) {
+        timerSegundo->stop();
+        delete timerSegundo;
+        timerSegundo = nullptr;
+    }
+
+    // Libera todos los enemigos creados dinámicamente.
+    for (Enemigo *e : enemigos) {
+        escena->removeItem(e);
+        delete e;
+    }
+    enemigos.clear(); // STL/Qt: limpia el QList
+}
+
+void Nivel1::inicializarNivel()
+{
+    cargarFondo(); // Cambia el background del nivel.
+
+    /*
+     * CREACIÓN DEL JUGADOR:
+     * - new → se crea en heap (vive toda la partida).
+     * - escena->addItem → el jugador se dibuja y actualiza en la escena.
+     */
+
+    jugador = new Gladiador();
+    escena->addItem(jugador);
+    jugador->setPos(150, escena->height()); // Posición inicial.
+
+    /*
+     * SEÑAL VIDA → HUD:
+     * - Percepción: Gladiador detecta cuando su vida cambia.
+     * - Acción: barraVida en el HUD se actualiza.
+     */
+    connect(jugador, &Gladiador::vidaCambiada, this, [this](int vida) {
+
+        barraVida->setValue(vida); // Actualiza barra de vida (parte visual).
+
+        // Si el jugador muere:
+        if (vida <= 0) {
+            nivelActivo = false;
+            timerJuego->stop();
+            if (timerSegundo) timerSegundo->stop();
+
+            // Espera 2 segundos para mostrar animación de muerte.
+            QTimer::singleShot(2000, this, [this]() {
+                finalizarNivel(false); // Notifica derrota.
+            });
+        }
+    });
+
+    generarEnemigo(0); // Primer enemigo (agente inteligente simple).
+
+    /*
+     * TIMER CADA 1 SEGUNDO:
+     * - Controla tiempo restante.
+     * - También hace spawn de enemigos.
+     */
+    timerSegundo = new QTimer(this);
+    connect(timerSegundo, &QTimer::timeout, this, &Nivel1::actualizarTemporizador);
+    timerSegundo->start(1000);
+
+    /*
+     * MÚSICA DEL NIVEL (QMediaPlayer):
+     */
+    musicaNivel = new QMediaPlayer(this);
+    audioOutput = new QAudioOutput(this);
+    musicaNivel->setAudioOutput(audioOutput);
+
+    musicaNivel->setSource(QUrl("qrc:/sounds/Gladiator Arena.mp3"));
+    audioOutput->setVolume(0.5);      // Volumen 0.5 = 50%
+    musicaNivel->setLoops(QMediaPlayer::Infinite);
+    musicaNivel->play();
+
+    nivelActivo = true; // El nivel ya está listo para funcionar.
+}
+
+void Nivel1::cargarFondo()
+{
+    /*
+     * RESPONSABILIDAD:
+     * - Cargar imagen del nivel.
+     * - Escalarla al tamaño de la ventana.
+     */
+    QPixmap fondo(":/images/Fondo1.jpg");
+
+    if (!fondo.isNull()) {
+
+        QPixmap scaled = fondo.scaled(
+            escena->width(),
+            escena->height(),
+            Qt::IgnoreAspectRatio,
+            Qt::SmoothTransformation // Evita pixeleo.
+        );
+        escena->setBackgroundBrush(scaled);
+
+    } else {
+        escena->setBackgroundBrush(Qt::black); // Si falla, pone fondo negro.
+    }
+}
+
+void Nivel1::generarEnemigo(int tipo)
+{
+    /*
+     * AGENTE INTELIGENTE:
+     * - Percepción: ve la posición del jugador.
+     * - Decisión: moverse/atacar.
+     * - Acción: perseguir/golpear.
+     * - Memoria: almacena estado "vivo" o "fuerte".
+     */
+
+    int escenaAlto = escena->height();
+    Enemigo *enemigo = nullptr;
+
+    // Tres tipos de enemigos.
+    if (tipo == 0) {
+        enemigo = new Enemigo(false); // Enemigo débil
+        enemigo->setPos(800, escenaAlto);
+
+    } else if (tipo == 1) {
+        enemigo = new Enemigo(false);
+        enemigo->setPos(1000, escenaAlto);
+
+    } else if (tipo == 2) {
+        enemigo = new Enemigo(true); // Enemigo fuerte
+        enemigo->setPos(1150, escenaAlto);
+    }
+
+    if (enemigo) {
+        escena->addItem(enemigo);
+        enemigos.append(enemigo); // QList (similar a vector dinámico)
+
+        /*
+         * SEÑAL DE ATAQUE DEL ENEMIGO:
+         * - Cuando enemigo "decide" atacar → agente inteligente.
+         */
+        connect(enemigo, &Enemigo::ataque, this, [this, enemigo]() {
+
+            if (jugador && enemigo && jugador->estaVivo() && enemigo->estaVivo()) {
+
+                QRectF rectJugador = jugador->getBoundingBox();
+                QRectF rangoAtaqueEnemigo = enemigo->getRangoAtaque();
+
+                // Si el enemigo alcanza al jugador, genera daño.
+                if (rangoAtaqueEnemigo.intersects(rectJugador)) {
+                    int danio = enemigo->esFuerteEnemigo() ? 15 : 12;
+                    jugador->recibirDanio(danio);
+                }
+            }
+        });
+
+        /*
+         * SEÑAL CUANDO EL ENEMIGO MUERE:
+         */
+        connect(enemigo, &Enemigo::murio, this, [this, enemigo]() {
+            escena->removeItem(enemigo);
+            enemigos.removeOne(enemigo);
+            enemigo->deleteLater(); // Qt lo borra cuando termine el ciclo de eventos.
+        });
+    }
+}
+
+void Nivel1::actualizarJuego()
+{
+    if (!nivelActivo) return;
+
+    /*
+     * CAPTURA DE ENTRADAS – FÍSICA DEL JUGADOR:
+     */
+    if (teclaIzquierda) jugador->moverIzquierda();
+    else if (teclaDerecha) jugador->moverDerecha();
+    else jugador->detener(); // Sin teclas → frena animación.
+
+    if (teclaSalto) { jugador->saltar(); teclaSalto = false; }
+    if (teclaAtaque) { jugador->atacar(); teclaAtaque = false; }
+
+    jugador->actualizar(); // Aplica física: gravedad, movimientos, animaciones.
+
+    /*
+     * ACTUALIZACIÓN DE ENEMIGOS:
+     * - Percepción: leen posición del jugador.
+     * - Decisión: caminar/atacar.
+     */
+    for (Enemigo *e : enemigos) {
+        if (e) e->actualizar(jugador->pos());
+    }
+
+    verificarColisiones();
+
+    /*
+     * GANAR EL NIVEL:
+     * - Si ya pasaron 10 s y ya no quedan enemigos vivos.
+     */
+    bool todosGenerados = (tiempoTranscurrido >= 10);
+
+    if (todosGenerados) {
+        int enemigosVivos = 0;
+        bool hayDesapareciendo = false;
+
+        for (Enemigo *e : enemigos) {
+            if (!e) continue;
+            if (e->estaVivo()) enemigosVivos++;
+            else hayDesapareciendo = true;
+        }
+
+        if (enemigosVivos == 0 && !hayDesapareciendo && enemigos.isEmpty()) {
+
+            nivelActivo = false;
+            timerJuego->stop();
+            if (timerSegundo) timerSegundo->stop();
+
+            QTimer::singleShot(1000, this, [this]() {
+                finalizarNivel(true); // Nivel completado.
+            });
+        }
+    }
+}
+
+void Nivel1::verificarColisiones()
+{
+    if (!jugador || !jugador->estaVivo()) return;
+
+    QRectF rectJugador = jugador->getBoundingBox();
+
+    for (Enemigo *enemigo : enemigos) {
+
+        if (!enemigo || !enemigo->estaVivo()) continue;
+
+        QRectF rectEnemigo = enemigo->getBoundingBox();
+
+        // COLISIÓN FÍSICA — empuja al jugador
+        if (rectJugador.intersects(rectEnemigo)) {
+            jugador->resolverColision(rectEnemigo);
+        }
+
+        // ATAQUE DEL JUGADOR
+        if (jugador->estaAtacando()) {
+
+            QRectF rangoAtaqueJugador = jugador->getRangoAtaque();
+
+            if (rangoAtaqueJugador.intersects(rectEnemigo)) {
+                enemigo->recibirDanio(4);
+                if (!enemigo->estaVivo()) enemigosEliminados++;
+            }
+        }
+    }
+}
+
+void Nivel1::actualizarTemporizador()
+{
+    if (!nivelActivo) return;
+
+    tiempoRestante--;
+    tiempoTranscurrido++;
+
+    /*
+     * CONTROL DE OLA DE ENEMIGOS:
+     */
+    if (tiempoTranscurrido == 5 && enemigos.size() < 2) generarEnemigo(1);
+    else if (tiempoTranscurrido == 10 && enemigos.size() < 3) generarEnemigo(2);
+
+    /*
+     * ACTUALIZACION DEL HUD DEL TIEMPO:
+     */
+    int minutos = tiempoRestante / 60;
+    int segundos = tiempoRestante % 60;
+
+    labelTiempo->setText(QString("Tiempo: %1:%2")
+                             .arg(minutos)
+                             .arg(segundos, 2, 10, QChar('0')));
+
+    /*
+     * FIN DEL NIVEL POR TIEMPO AGOTADO
+     */
+    if (tiempoRestante <= 0) {
+        nivelActivo = false;
+        timerJuego->stop();
+        timerSegundo->stop();
+        finalizarNivel(false); // Perdiste
+    }
+}
